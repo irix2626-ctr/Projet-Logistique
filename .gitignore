@@ -1,0 +1,29 @@
+# Dossier interne de l'IDE (exclu du dépôt)
+.freebuff/
+
+# Secrets et environnements (exigence SEC-1.1)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+storage/*.key
+
+# Dépendances et artefacts de build
+node_modules/
+vendor/
+dist/
+target/
+src-tauri/gen/
+
+# Bases de données locales
+*.db
+*.sqlite
+*.sqlite3
+
+# Journaux et fichiers système
+*.log
+.DS_Store
+Thumbs.db

@@ -1,0 +1,29 @@
+[package]
+name = "logistique"
+version = "0.1.0"
+description = "Logistique et traçabilité des ressources matérielles"
+edition = "2021"
+
+[lib]
+name = "logistique_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Base locale : SQLite embarqué (compilé avec l'application), vraies transactions.
+rusqlite = { version = "0.32", features = ["bundled"] }
+# Coffre sécurisé du système (Gestionnaire d'identifiants Windows) pour le jeton d'API.
+keyring = "4"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

@@ -1,0 +1,888 @@
+openapi: 3.1.0
+info:
+  title: API Logistique & Traçabilité
+  version: 1.0.0
+  description: |
+    Contrat de l'API Laravel 13 consommée par le client desktop Tauri (tâche A1.6 de la roadmap).
+    Règles transversales :
+    - Authentification par jeton Sanctum (Bearer), sauf routes marquées publiques.
+    - Identifiants UUID générés par le CLIENT (création hors-ligne) ; le serveur les accepte et les valide.
+    - Soft delete partout : aucune route ne supprime physiquement.
+    - Listes : 100 éléments par page, pagination par curseur (sauf `dashboard.derniers_mouvements`).
+    - `operateur_id` est toujours déduit du jeton, jamais lu dans le corps de la requête, SAUF dans /sync/push (voir cette route et SECURITE.md SEC-6.4).
+    - Aucun coût unitaire : seul `cout_total` du lot existe.
+    - Pas de bon de livraison : les documents sont des pièces jointes libres.
+    - Sorties en lecture seule : aucune route PUT/DELETE sur /sorties.
+servers:
+  - url: https://logistique-api.test/api/v1
+    description: Développement (Laravel Herd)
+security:
+  - bearerAuth: []
+tags:
+  - name: Auth
+  - name: Référentiels
+  - name: Lots
+  - name: Sorties
+  - name: Documents
+  - name: Traçabilité
+  - name: Dashboard
+  - name: Synchronisation
+  - name: Administration
+  - name: Mises à jour
+
+paths:
+  /ping:
+    get:
+      tags: [Auth]
+      summary: Test de disponibilité (public)
+      security: []
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: object, properties: { status: { type: string, example: ok }, server_time: { type: string, format: date-time }, api_version: { type: string } } } } } }
+
+  /structures:
+    get:
+      tags: [Auth]
+      summary: Liste des structures pour l'écran de connexion (public, mise en cache locale)
+      security: []
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Structure' } } } } }
+
+  /devices:
+    post:
+      tags: [Auth]
+      summary: Enregistrer un poste (premier lancement) et obtenir son `code_poste`
+      description: Le code poste (`P01`, `P02`…) sert à construire `numero_lot` (`LOT-AAAA-Pxx-00001`). Idempotent sur `id`.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [id, nom], properties: { id: { $ref: '#/components/schemas/Uuid' }, nom: { type: string, example: 'PC Magasin 1' } } } } }
+      responses:
+        '201': { description: Poste enregistré, content: { application/json: { schema: { $ref: '#/components/schemas/Device' } } } }
+        '200': { description: Poste déjà enregistré, content: { application/json: { schema: { $ref: '#/components/schemas/Device' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Connexion par structure (public)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [structure_id, identifiant, mot_de_passe, device_name]
+              properties:
+                structure_id: { $ref: '#/components/schemas/Uuid' }
+                identifiant: { type: string, description: Identifiant ou email }
+                mot_de_passe: { type: string, format: password }
+                device_name: { type: string, description: Nom lisible du poste }
+                device_id: { $ref: '#/components/schemas/Uuid', description: 'Poste déjà enregistré : lie l''utilisateur à ce poste pour la connexion hors-ligne et la synchro' }
+      responses:
+        '200':
+          description: Jeton Sanctum avec capacités `admin` ou `personnel`
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+                  user: { $ref: '#/components/schemas/User' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Révoque le jeton courant
+      responses:
+        '204': { description: Déconnecté }
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Utilisateur courant
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/password:
+    put:
+      tags: [Auth]
+      summary: Changer son propre mot de passe (obligatoire à la première connexion)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mot_de_passe_actuel, nouveau_mot_de_passe]
+              properties:
+                mot_de_passe_actuel: { type: string, format: password }
+                nouveau_mot_de_passe: { type: string, format: password, minLength: 10 }
+      responses:
+        '200': { description: Mot de passe changé (les autres jetons du compte sont révoqués), content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /users:
+    get:
+      tags: [Administration]
+      summary: Liste des comptes (admin)
+      parameters: [{ $ref: '#/components/parameters/Cursor' }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/UserPage' } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Administration]
+      summary: Créer un compte (admin ; structure = celle de l'admin, rôle par défaut `personnel`)
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/UserCreate' } } }
+      responses:
+        '201': { description: Créé, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /users/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    put:
+      tags: [Administration]
+      summary: Modifier un compte (admin)
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/UserUpdate' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    delete:
+      tags: [Administration]
+      summary: Supprimer un compte (soft delete, jetons révoqués)
+      responses:
+        '204': { description: Supprimé }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /categories:
+    get:
+      tags: [Référentiels]
+      summary: Liste des catégories
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Categorie' } } } } }
+    post:
+      tags: [Référentiels]
+      summary: Créer une catégorie (admin)
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/Categorie' } } }
+      responses:
+        '201': { description: Créée, content: { application/json: { schema: { $ref: '#/components/schemas/Categorie' } } } }
+
+  /categories/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    put:
+      tags: [Référentiels]
+      summary: Modifier une catégorie (admin)
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/Categorie' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Categorie' } } } }
+    delete:
+      tags: [Référentiels]
+      summary: Supprimer une catégorie (soft delete, refusé si des matériels l'utilisent)
+      responses:
+        '204': { description: Supprimée }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /materiels:
+    get:
+      tags: [Référentiels]
+      summary: Catalogue du matériel
+      parameters:
+        - { name: q, in: query, schema: { type: string }, description: Recherche sur la désignation }
+        - { name: categorie_id, in: query, schema: { $ref: '#/components/schemas/Uuid' } }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MaterielPage' } } } }
+    post:
+      tags: [Référentiels]
+      summary: Créer un matériel
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/Materiel' } } }
+      responses:
+        '201': { description: Créé, content: { application/json: { schema: { $ref: '#/components/schemas/Materiel' } } } }
+
+  /materiels/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    put:
+      tags: [Référentiels]
+      summary: Modifier un matériel
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/Materiel' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Materiel' } } } }
+    delete:
+      tags: [Référentiels]
+      summary: Supprimer un matériel (soft delete, refusé si des lots existent)
+      responses:
+        '204': { description: Supprimé }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /lots:
+    get:
+      tags: [Lots]
+      summary: Liste des lots (entrées), 100 par page
+      parameters:
+        - { name: q, in: query, schema: { type: string }, description: Recherche plein texte }
+        - { name: categorie_id, in: query, schema: { $ref: '#/components/schemas/Uuid' } }
+        - { name: structure_id, in: query, schema: { $ref: '#/components/schemas/Uuid' } }
+        - { name: fournisseur, in: query, schema: { type: string } }
+        - { name: etat_fonctionnement, in: query, schema: { $ref: '#/components/schemas/Etat' } }
+        - { name: date_from, in: query, schema: { type: string, format: date } }
+        - { name: date_to, in: query, schema: { type: string, format: date } }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/LotPage' } } } }
+    post:
+      tags: [Lots]
+      summary: Enregistrer une entrée (crée le lot, immédiatement disponible)
+      description: |
+        `numero_lot` est généré par le client au format `LOT-AAAA-Pxx-00001` ; le serveur valide le format et l'unicité.
+        `operateur_id` et `date_entree` sont fixés automatiquement. Idempotent sur `id`.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/LotCreate' } } }
+      responses:
+        '201': { description: Lot créé, content: { application/json: { schema: { $ref: '#/components/schemas/Lot' } } } }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /lots/suggestion:
+    get:
+      tags: [Lots]
+      summary: Lot proposé pour une sortie (le plus ancien disponible, FIFO)
+      parameters:
+        - { name: materiel_id, in: query, required: true, schema: { $ref: '#/components/schemas/Uuid' } }
+      responses:
+        '200': { description: Lot suggéré, content: { application/json: { schema: { $ref: '#/components/schemas/Lot' } } } }
+        '404': { description: Aucun lot disponible pour ce matériel }
+
+  /lots/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    get:
+      tags: [Lots]
+      summary: Détail d'un lot
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Lot' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Lots]
+      summary: Corriger un lot
+      description: La `quantite_initiale` ne peut pas devenir inférieure à la quantité déjà sortie (409 sinon).
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/LotUpdate' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Lot' } } } }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [Lots]
+      summary: Supprimer un lot (soft delete)
+      description: Refusé (409) si le lot a déjà des sorties.
+      responses:
+        '204': { description: Supprimé }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /lots/{id}/cycle:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    get:
+      tags: [Traçabilité]
+      summary: Cycle de vie d'un lot (arrivage → sorties successives → reste)
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/CycleLot' } } } }
+
+  /stock:
+    get:
+      tags: [Lots]
+      summary: Lots disponibles (`quantite_restante > 0`)
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - { name: categorie_id, in: query, schema: { $ref: '#/components/schemas/Uuid' } }
+        - { name: etat_fonctionnement, in: query, schema: { $ref: '#/components/schemas/Etat' } }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/LotPage' } } } }
+
+  /sorties:
+    get:
+      tags: [Sorties]
+      summary: Registre des sorties (lecture seule), 100 par page
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - { name: lot_id, in: query, schema: { $ref: '#/components/schemas/Uuid' } }
+        - { name: pr_sr, in: query, schema: { type: string } }
+        - { name: operateur_id, in: query, schema: { $ref: '#/components/schemas/Uuid' } }
+        - { name: date_from, in: query, schema: { type: string, format: date } }
+        - { name: date_to, in: query, schema: { type: string, format: date } }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/SortiePage' } } } }
+    post:
+      tags: [Sorties]
+      summary: Enregistrer une sortie
+      description: |
+        `lot_id` obligatoire ; `quantite` ≤ `quantite_restante` (vérifié sous verrou de ligne). `pr_sr` est forcé
+        par le serveur avec la structure de l'utilisateur. Idempotent sur `id`. En ligne : dépassement = 409.
+        Via la synchronisation : une sortie réelle est acceptée et le dépassement devient un conflit (voir /sync/push).
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/SortieCreate' } } }
+      responses:
+        '201': { description: Sortie créée, content: { application/json: { schema: { $ref: '#/components/schemas/Sortie' } } } }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /sorties/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    get:
+      tags: [Sorties]
+      summary: Détail d'une sortie
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Sortie' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /sorties/{id}/bon:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    get:
+      tags: [Sorties]
+      summary: Données du Bon de Sortie (le PDF est généré côté client)
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/BonSortie' } } } }
+
+  /sorties/{id}/signature:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    get:
+      tags: [Sorties]
+      summary: Image PNG de la signature (route authentifiée)
+      responses:
+        '200': { description: PNG, content: { image/png: { schema: { type: string, format: binary } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /documents:
+    post:
+      tags: [Documents]
+      summary: Joindre un document (PDF ou image) à un lot ou une sortie
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [id, rattache_type, rattache_id, fichier]
+              properties:
+                id: { $ref: '#/components/schemas/Uuid' }
+                rattache_type: { type: string, enum: [lot, sortie] }
+                rattache_id: { $ref: '#/components/schemas/Uuid' }
+                fichier: { type: string, format: binary, description: 'PDF, JPG, PNG ; taille maximale à fixer (ex. 10 Mo)' }
+      responses:
+        '201': { description: Joint, content: { application/json: { schema: { $ref: '#/components/schemas/Document' } } } }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /documents/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    get:
+      tags: [Documents]
+      summary: Télécharger un document (route authentifiée)
+      responses:
+        '200': { description: Fichier, content: { application/octet-stream: { schema: { type: string, format: binary } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /tracabilite:
+    get:
+      tags: [Traçabilité]
+      summary: Journal unifié entrées + sorties, 100 par page
+      parameters:
+        - { name: q, in: query, schema: { type: string }, description: 'Recherche sur toutes les colonnes' }
+        - { name: type, in: query, schema: { type: string, enum: [entree, sortie] } }
+        - { name: categorie_id, in: query, schema: { $ref: '#/components/schemas/Uuid' } }
+        - { name: numero_lot, in: query, schema: { type: string } }
+        - { name: pr_sr, in: query, schema: { type: string } }
+        - { name: operateur_id, in: query, schema: { $ref: '#/components/schemas/Uuid' } }
+        - { name: beneficiaire, in: query, schema: { type: string } }
+        - { name: date_from, in: query, schema: { type: string, format: date } }
+        - { name: date_to, in: query, schema: { type: string, format: date } }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/TracePage' } } } }
+
+  /dashboard:
+    get:
+      tags: [Dashboard]
+      summary: Récapitulatif (valeur du stock, catégories, état des machines, 100 derniers mouvements)
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Dashboard' } } } }
+
+  /sync/push:
+    post:
+      tags: [Synchronisation]
+      summary: Envoyer l'outbox (opérations idempotentes, traitées une par une)
+      description: |
+        Chaque opération est traitée indépendamment dans sa propre transaction ; une erreur ne bloque pas les autres.
+        Rejouer une opération (même `op_id`) renvoie `duplicate` sans effet.
+        Une sortie qui fait dépasser la quantité d'un lot est ACCEPTÉE (elle a eu lieu) et produit un conflit
+        visible dans `/admin/conflits`. Une opération visant un lot archivé est acceptée et signalée.
+        Exception à la règle sur `operateur_id` : plusieurs utilisateurs peuvent travailler hors-ligne sur le même poste,
+        l'opérateur voyage donc dans `payload.operateur_id`. Le serveur l'accepte seulement si l'utilisateur est actif et s'est
+        déjà authentifié en ligne sur ce `device_id` ; sinon l'opération est rejetée (SEC-6.4).
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/SyncPushRequest' } } }
+      responses:
+        '200': { description: Résultat par opération, content: { application/json: { schema: { $ref: '#/components/schemas/SyncPushResponse' } } } }
+        '426': { description: Version du client trop ancienne, mise à jour obligatoire }
+
+  /sync/pull:
+    get:
+      tags: [Synchronisation]
+      summary: Récupérer les changements depuis un curseur (suppressions incluses)
+      parameters:
+        - { name: cursor, in: query, required: true, schema: { type: integer, minimum: 0 }, description: 'Dernier `server_seq` connu (0 pour l''amorçage initial)' }
+        - { name: device_id, in: query, required: true, schema: { $ref: '#/components/schemas/Uuid' } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/SyncPullResponse' } } } }
+
+  /sync/fichiers:
+    post:
+      tags: [Synchronisation]
+      summary: Envoyer pièces jointes et signatures (après les enregistrements, reprise possible)
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [type, rattache_id, fichier]
+              properties:
+                type: { type: string, enum: [document, signature] }
+                rattache_id: { $ref: '#/components/schemas/Uuid' }
+                fichier: { type: string, format: binary }
+                sha256: { type: string, description: Empreinte pour vérifier l'intégrité du transfert }
+      responses:
+        '200': { description: Reçu, content: { application/json: { schema: { type: object, properties: { chemin: { type: string } } } } } }
+
+  /admin/archivage:
+    post:
+      tags: [Administration]
+      summary: Archiver après export et reporter le stock restant (admin, en ligne uniquement)
+      description: |
+        Opération atomique : crée un `archive_batch_id`, marque lots/sorties/documents `deleted_at`, crée les lots de
+        report (`est_stock_initial = true`, `lot_origine_id`, coût au prorata du reste). Rien n'est supprimé physiquement.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [export_confirme, mot_de_passe]
+              properties:
+                export_confirme: { type: boolean, description: 'Doit être true : l''export a réussi côté client' }
+                mot_de_passe: { type: string, format: password }
+                forcer_si_postes_non_synchronises: { type: boolean, default: false }
+      responses:
+        '200': { description: Archivage effectué, content: { application/json: { schema: { $ref: '#/components/schemas/ArchiveResult' } } } }
+        '409': { description: Postes non synchronisés, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/reinitialisation:
+    post:
+      tags: [Administration]
+      summary: Réinitialisation manuelle (même mécanisme d'archivage, mot de passe obligatoire)
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [mot_de_passe], properties: { mot_de_passe: { type: string, format: password }, forcer_si_postes_non_synchronises: { type: boolean, default: false } } } } }
+      responses:
+        '200': { description: Réinitialisé, content: { application/json: { schema: { $ref: '#/components/schemas/ArchiveResult' } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/conflits:
+    get:
+      tags: [Administration]
+      summary: Conflits de synchronisation à traiter (admin)
+      parameters:
+        - { name: resolu, in: query, schema: { type: boolean } }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ConflictPage' } } } }
+  /admin/conflits/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    put:
+      tags: [Administration]
+      summary: Clôturer un conflit avec un commentaire (admin)
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [commentaire], properties: { commentaire: { type: string } } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Conflict' } } } }
+
+  /admin/integrite:
+    get:
+      tags: [Administration]
+      summary: 'Contrôle d''intégrité (objectif : 0 anomalie = critère n°1)'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Integrite' } } } }
+
+  /updates/{target}/{arch}/{version}:
+    get:
+      tags: [Mises à jour]
+      summary: Manifeste Tauri Updater (public, HTTPS obligatoire en production)
+      security: []
+      parameters:
+        - { name: target, in: path, required: true, schema: { type: string, enum: [windows, linux, darwin] } }
+        - { name: arch, in: path, required: true, schema: { type: string, enum: [x86_64, i686, aarch64, armv7] } }
+        - { name: version, in: path, required: true, schema: { type: string, example: 0.1.0 } }
+      responses:
+        '200': { description: Mise à jour disponible, content: { application/json: { schema: { $ref: '#/components/schemas/UpdateManifest' } } } }
+        '204': { description: Déjà à jour }
+
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, description: Jeton Laravel Sanctum }
+
+  parameters:
+    IdPath: { name: id, in: path, required: true, schema: { $ref: '#/components/schemas/Uuid' } }
+    Cursor: { name: cursor, in: query, required: false, schema: { type: string }, description: 'Curseur de page (taille fixe : 100)' }
+
+  responses:
+    Unauthorized: { description: Non authentifié, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    Forbidden: { description: Rôle insuffisant, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    NotFound: { description: Introuvable, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    Conflict: { description: Règle métier violée, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    ValidationError: { description: Validation échouée, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    TooManyRequests: { description: Trop de requêtes, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  schemas:
+    Uuid: { type: string, format: uuid }
+    Etat: { type: string, enum: [fonctionnel, non_fonctionnel] }
+
+    Error:
+      type: object
+      required: [message]
+      properties:
+        message: { type: string }
+        code: { type: string, example: STOCK_INSUFFISANT, description: 'Code métier stable (STOCK_INSUFFISANT, LOT_AVEC_SORTIES, QUANTITE_SOUS_SORTIES, NUMERO_LOT_DUPLIQUE…)' }
+        errors: { type: object, additionalProperties: { type: array, items: { type: string } } }
+
+    Page:
+      type: object
+      properties:
+        next_cursor: { type: [string, 'null'] }
+
+    Structure:
+      type: object
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        nom: { type: string, example: PNLP }
+    Device:
+      type: object
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        nom: { type: string }
+        code_poste: { type: string, example: P01 }
+        derniere_synchro: { type: [string, 'null'], format: date-time }
+
+    User:
+      type: object
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        structure_id: { $ref: '#/components/schemas/Uuid' }
+        nom: { type: string }
+        email: { type: string }
+        role: { type: string, enum: [admin, personnel] }
+    UserCreate:
+      type: object
+      required: [id, nom, email, mot_de_passe]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        nom: { type: string }
+        email: { type: string }
+        mot_de_passe: { type: string, format: password }
+        role: { type: string, enum: [admin, personnel], default: personnel }
+    UserUpdate:
+      type: object
+      properties:
+        nom: { type: string }
+        email: { type: string }
+        mot_de_passe: { type: string, format: password }
+        role: { type: string, enum: [admin, personnel] }
+    UserPage:
+      allOf:
+        - $ref: '#/components/schemas/Page'
+        - type: object
+          properties: { data: { type: array, items: { $ref: '#/components/schemas/User' } } }
+
+    Categorie:
+      type: object
+      required: [id, nom]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        nom: { type: string }
+        icone: { type: string, description: Nom d'icône Lucide }
+        couleur_fond: { type: string, description: Couleur pastel, example: '#E8F1FF' }
+
+    Materiel:
+      type: object
+      required: [id, designation, categorie_id]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        designation: { type: string }
+        categorie_id: { $ref: '#/components/schemas/Uuid' }
+        marque_modele: { type: [string, 'null'] }
+    MaterielPage:
+      allOf:
+        - $ref: '#/components/schemas/Page'
+        - type: object
+          properties: { data: { type: array, items: { $ref: '#/components/schemas/Materiel' } } }
+
+    LotFiche:
+      type: object
+      description: Fiche technique et logistique, commune à la création et à la correction.
+      properties:
+        fournisseur: { type: string }
+        description: { type: [string, 'null'] }
+        usage: { type: string, description: 'Usage prévu (jamais « destination »)' }
+        etat_fonctionnement: { $ref: '#/components/schemas/Etat' }
+        no_serie_chassis: { type: [string, 'null'] }
+        code_bailleur_immatriculation: { type: [string, 'null'] }
+        structure_service: { type: [string, 'null'] }
+        observations: { type: [string, 'null'] }
+        quantite_initiale: { type: integer, minimum: 1 }
+        cout_total: { type: number, minimum: 0, description: 'Coût total du lot (aucun coût unitaire)' }
+    LotCreate:
+      allOf:
+        - $ref: '#/components/schemas/LotFiche'
+        - type: object
+          required: [id, numero_lot, materiel_id, quantite_initiale, cout_total]
+          properties:
+            id: { $ref: '#/components/schemas/Uuid' }
+            numero_lot: { type: string, pattern: '^LOT-\d{4}-P\d{2,}-\d{5}$', example: LOT-2026-P01-00001 }
+            materiel_id: { $ref: '#/components/schemas/Uuid' }
+    LotUpdate:
+      allOf:
+        - $ref: '#/components/schemas/LotFiche'
+        - type: object
+          properties:
+            materiel_id: { $ref: '#/components/schemas/Uuid', description: 'Permet de corriger le matériel (désignation, catégorie, marque)' }
+            version: { type: integer, description: 'Version connue du client, pour détecter une modification concurrente' }
+    Lot:
+      allOf:
+        - $ref: '#/components/schemas/LotFiche'
+        - type: object
+          properties:
+            id: { $ref: '#/components/schemas/Uuid' }
+            numero_lot: { type: string }
+            materiel: { $ref: '#/components/schemas/Materiel' }
+            structure_id: { $ref: '#/components/schemas/Uuid' }
+            operateur_id: { $ref: '#/components/schemas/Uuid' }
+            date_entree: { type: string, format: date-time }
+            est_stock_initial: { type: boolean }
+            lot_origine_id: { type: [string, 'null'], format: uuid }
+            archive_batch_id: { type: [string, 'null'], format: uuid }
+            quantite_restante: { type: integer, description: 'Dérivée : quantité initiale − Σ sorties. Jamais saisie.' }
+            valeur_restante: { type: number, description: 'cout_total × restante / initiale (calculée, non stockée)' }
+            version: { type: integer }
+            documents: { type: array, items: { $ref: '#/components/schemas/Document' } }
+    LotPage:
+      allOf:
+        - $ref: '#/components/schemas/Page'
+        - type: object
+          properties: { data: { type: array, items: { $ref: '#/components/schemas/Lot' } } }
+
+    SortieCreate:
+      type: object
+      required: [id, lot_id, quantite, nom_beneficiaire, usage, etat_fonctionnement]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        lot_id: { $ref: '#/components/schemas/Uuid' }
+        quantite: { type: integer, minimum: 1 }
+        nom_beneficiaire: { type: string }
+        contact_beneficiaire: { type: [string, 'null'] }
+        fonction: { type: [string, 'null'] }
+        usage: { type: string }
+        etat_fonctionnement: { $ref: '#/components/schemas/Etat' }
+        description: { type: [string, 'null'], description: Facultative }
+        signature: { type: [string, 'null'], description: 'Image PNG en base64 (envoi direct en ligne) ; hors-ligne, voir /sync/fichiers' }
+    Sortie:
+      allOf:
+        - $ref: '#/components/schemas/SortieCreate'
+        - type: object
+          properties:
+            pr_sr: { type: string, description: 'Auto : structure de l''utilisateur connecté' }
+            signature_path: { type: [string, 'null'] }
+            operateur_id: { $ref: '#/components/schemas/Uuid' }
+            date_sortie: { type: string, format: date-time }
+            numero_lot: { type: string }
+            archive_batch_id: { type: [string, 'null'], format: uuid }
+            conflit_stock: { type: boolean, description: 'true si cette sortie a provoqué un dépassement lors d''une synchronisation' }
+    SortiePage:
+      allOf:
+        - $ref: '#/components/schemas/Page'
+        - type: object
+          properties: { data: { type: array, items: { $ref: '#/components/schemas/Sortie' } } }
+
+    BonSortie:
+      type: object
+      properties:
+        sortie: { $ref: '#/components/schemas/Sortie' }
+        lot: { $ref: '#/components/schemas/Lot' }
+        operateur_nom: { type: string }
+        signature_url: { type: [string, 'null'] }
+
+    Document:
+      type: object
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        rattache_type: { type: string, enum: [lot, sortie] }
+        rattache_id: { $ref: '#/components/schemas/Uuid' }
+        nom: { type: string }
+        mime: { type: string }
+
+    TraceEntry:
+      type: object
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        type: { type: string, enum: [entree, sortie] }
+        date: { type: string, format: date-time }
+        numero_lot: { type: string }
+        designation: { type: string }
+        categorie: { type: string }
+        quantite: { type: integer }
+        pr_sr: { type: [string, 'null'] }
+        beneficiaire: { type: [string, 'null'] }
+        operateur: { type: string }
+    TracePage:
+      allOf:
+        - $ref: '#/components/schemas/Page'
+        - type: object
+          properties: { data: { type: array, items: { $ref: '#/components/schemas/TraceEntry' } } }
+
+    CycleLot:
+      type: object
+      properties:
+        lot: { $ref: '#/components/schemas/Lot' }
+        sorties: { type: array, items: { $ref: '#/components/schemas/Sortie' } }
+        total_sorti: { type: integer }
+        reste: { type: integer }
+
+    Dashboard:
+      type: object
+      properties:
+        valeur_totale_stock: { type: number }
+        categories:
+          type: array
+          items:
+            type: object
+            properties:
+              categorie: { $ref: '#/components/schemas/Categorie' }
+              quantite_totale: { type: integer }
+              nombre_articles: { type: integer }
+        etat_machines:
+          type: object
+          properties: { fonctionnel: { type: integer }, non_fonctionnel: { type: integer } }
+        derniers_mouvements:
+          type: array
+          maxItems: 100
+          description: 100 derniers mouvements, sans pagination
+          items: { $ref: '#/components/schemas/TraceEntry' }
+
+    SyncOperation:
+      type: object
+      required: [op_id, table, record_id, operation, payload, client_ts]
+      properties:
+        op_id: { $ref: '#/components/schemas/Uuid' }
+        table: { type: string, enum: [categories, materiels, lots, sorties, documents, users] }
+        record_id: { $ref: '#/components/schemas/Uuid' }
+        operation: { type: string, enum: [create, update, delete] }
+        payload: { type: object }
+        base_version: { type: [integer, 'null'], description: 'Version du lot au moment de la modification locale' }
+        client_ts: { type: string, format: date-time }
+    SyncPushRequest:
+      type: object
+      required: [device_id, operations]
+      properties:
+        device_id: { $ref: '#/components/schemas/Uuid' }
+        operations: { type: array, items: { $ref: '#/components/schemas/SyncOperation' }, maxItems: 500 }
+    SyncResult:
+      type: object
+      properties:
+        op_id: { $ref: '#/components/schemas/Uuid' }
+        status: { type: string, enum: [accepted, duplicate, conflict, rejected] }
+        server_seq: { type: [integer, 'null'] }
+        conflict_id: { type: [string, 'null'], format: uuid }
+        message: { type: [string, 'null'] }
+    SyncPushResponse:
+      type: object
+      properties:
+        results: { type: array, items: { $ref: '#/components/schemas/SyncResult' } }
+    SyncChange:
+      type: object
+      properties:
+        table: { type: string }
+        record: { type: object, description: 'Enregistrement complet, `deleted_at` renseigné pour une suppression' }
+        server_seq: { type: integer }
+    SyncPullResponse:
+      type: object
+      properties:
+        changes: { type: array, items: { $ref: '#/components/schemas/SyncChange' } }
+        next_cursor: { type: integer }
+        has_more: { type: boolean }
+
+    Conflict:
+      type: object
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        type: { type: string, enum: [depassement_stock, modification_concurrente, lot_archive] }
+        lot_id: { $ref: '#/components/schemas/Uuid' }
+        detail: { type: string }
+        resolu: { type: boolean }
+        commentaire: { type: [string, 'null'] }
+        created_at: { type: string, format: date-time }
+    ConflictPage:
+      allOf:
+        - $ref: '#/components/schemas/Page'
+        - type: object
+          properties: { data: { type: array, items: { $ref: '#/components/schemas/Conflict' } } }
+
+    ArchiveResult:
+      type: object
+      properties:
+        archive_batch_id: { $ref: '#/components/schemas/Uuid' }
+        lots_archives: { type: integer }
+        sorties_archivees: { type: integer }
+        lots_reportes: { type: integer }
+        valeur_stock_avant: { type: number }
+        valeur_stock_apres: { type: number, description: 'Doit être égale à valeur_stock_avant' }
+
+    Integrite:
+      type: object
+      properties:
+        anomalies:
+          type: array
+          items:
+            type: object
+            properties:
+              type: { type: string, enum: [sorties_superieures_au_lot, sortie_orpheline, lot_sans_operateur, lot_report_sans_origine] }
+              lot_id: { type: [string, 'null'], format: uuid }
+              detail: { type: string }
+        total: { type: integer, description: 'Objectif : 0' }
+
+    UpdateManifest:
+      type: object
+      required: [version, url, signature]
+      properties:
+        version: { type: string }
+        notes: { type: string }
+        pub_date: { type: string, format: date-time }
+        url: { type: string, format: uri }
+        signature: { type: string, description: 'Contenu du fichier .sig généré par le build Tauri' }
