@@ -3,7 +3,7 @@ import { openModal, field, val } from './ui/modal.js';
 import { toast, toastError } from './ui/toast.js';
 import { session, isAdmin } from './core/session.js';
 import { on } from './core/events.js';
-import { fmtDate } from './core/format.js';
+
 import { logout, reauth } from './services/auth.js';
 import { syncState, runOnce, startAutoSync, stopAutoSync, refreshCounts } from './services/sync.js';
 
@@ -22,10 +22,7 @@ const NAV = [
   ['tracabilite', 'Traçabilité'], ['historique', 'Historique des exports'], ['parametres', 'Paramètres', true],
 ];
 
-const SYNC_LABEL = {
-  idle: 'Synchronisé', running: 'Synchronisation…', offline: 'Hors-ligne', auth: 'Reconnexion requise',
-  update: 'Mise à jour requise', revoked: 'Poste révoqué', error: 'Erreur de synchronisation',
-};
+
 
 let currentPage = 'dashboard';
 let pageParams = {};
@@ -62,21 +59,7 @@ async function renderPage() {
   }
 }
 
-function paintSync(s) {
-  const el = $('[data-sync]');
-  if (!el) return;
-  const bits = [];
-  if (s.pending) bits.push(`${s.pending} en attente`);
-  if (s.rejected) bits.push(`${s.rejected} refusée(s)`);
-  if (s.conflicts) bits.push(`${s.conflicts} conflit(s)`);
-  if (!bits.length && s.lastSync) bits.push(`Dernière : ${fmtDate(s.lastSync)}`);
-  el.dataset.state = s.state;
-  mount(el, html`
-    <b><span class="sync-dot"></span>${SYNC_LABEL[s.state] || s.state}</b>
-    ${bits.length ? html`<small>${bits.join(' · ')}</small>` : ''}
-    ${s.error ? html`<small>${s.error}</small>` : ''}
-    <button class="btn" data-sync-now ${s.state === 'running' ? 'disabled' : ''}>${s.state === 'auth' ? 'Se reconnecter' : 'Synchroniser'}</button>`);
-}
+
 
 async function reconnect() {
   await openModal({
@@ -105,7 +88,6 @@ export function showApp(root, { loggedOut }) {
           ${NAV.filter((n) => !n[2] || isAdmin()).map(([id, label]) => html`<button type="button" data-page="${id}">${label}</button>`)}
         </nav>
         <div class="me">
-          <div class="sync" data-sync data-state="idle"></div>
           <div><strong>${u.nom}</strong><br /><span>${u.structure_nom} · ${u.role === 'admin' ? 'Administrateur' : 'Personnel'}</span></div>
           <button class="btn" id="logout" type="button">Déconnexion</button>
         </div>
@@ -122,16 +104,9 @@ export function showApp(root, { loggedOut }) {
     await logout();
     onLoggedOut();
   });
-  $('[data-sync]').addEventListener('click', (e) => {
-    if (!e.target.closest('[data-sync-now]')) return;
-    if (syncState.state === 'auth') reconnect().catch(toastError);
-    else runOnce().then((s) => s.state === 'offline' && toast('Serveur injoignable : vos données restent enregistrées sur ce poste.', 'err'));
-  });
-
   offSync?.();
-  offSync = on('sync-status', paintSync);
   window.addEventListener('hashchange', renderPage);
-  refreshCounts().then(() => paintSync({ ...syncState }));
+  refreshCounts();
   startAutoSync();
   renderPage();
 }

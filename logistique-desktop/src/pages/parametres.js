@@ -15,77 +15,12 @@ import { serverSettings } from './login.js';
 export async function render(main, { navigate }) {
   mount(main, html`
     <div class="page-h"><h1>Paramètres</h1></div>
-    <section class="card" id="sec-poste"></section>
-    <section class="card" id="sec-sync"></section>
     <section class="card" id="sec-comptes"></section>
     <section class="card" id="sec-cats"></section>
     <section class="card danger-zone" id="sec-reset"></section>`);
 
-  await Promise.all([poste(), sync(), comptes(), categories()]);
+  await Promise.all([comptes(), categories()]);
   reset(navigate);
-}
-
-// ------------------------------------------------------------------ poste et serveur
-async function poste() {
-  const el = $('#sec-poste');
-  mount(el, html`
-    <h2>Ce poste</h2>
-    <dl class="kv">
-      <dt>Nom du poste</dt><dd>${(await getKv('device_name')) || '—'}</dd>
-      <dt>Code du poste</dt><dd>${(await getKv('device_code')) || 'non enregistré'}</dd>
-      <dt>Serveur</dt><dd>${(await getKv('server_url')) || '—'}</dd>
-      <dt>Structure (PR / SR)</dt><dd>${session.user.structure_nom}</dd>
-    </dl>
-    <div><button class="btn" id="srv">Modifier le serveur / le nom du poste</button></div>`);
-  $('#srv').addEventListener('click', async () => { await serverSettings(); poste(); });
-}
-
-// ------------------------------------------------------------------ synchronisation
-async function sync() {
-  const el = $('#sec-sync');
-  const rejected = await listRejected();
-  mount(el, html`
-    <h2>Synchronisation</h2>
-    <p>État : <strong>${syncState.state}</strong> · ${syncState.pending} opération(s) en attente · dernière synchronisation : ${syncState.lastSync ? fmtDate(syncState.lastSync) : 'jamais'}</p>
-    <div class="btns"><button class="btn btn-pri" id="sync-now">Synchroniser maintenant</button>
-      ${syncState.conflicts ? html`<button class="btn" id="seen">Marquer ${syncState.conflicts} conflit(s) comme vus</button>` : ''}</div>
-    ${rejected.length ? html`
-      <h3>Opérations refusées par le serveur</h3>
-      <p class="hint">Ces opérations n'ont pas été acceptées : corrigez la cause puis réessayez, ou abandonnez-les.</p>
-      <div class="table-wrap short"><table><thead><tr><th>Date</th><th>Table</th><th>Opération</th><th>Motif</th><th>Action</th></tr></thead><tbody>
-        ${rejected.map((r) => html`<tr><td>${fmtDate(r.client_ts)}</td><td>${r.table_name}</td><td>${r.operation}</td><td>${r.derniere_erreur}</td>
-          <td><button class="btn btn-sm" data-drop="${r.seq}">Abandonner</button></td></tr>`)}</tbody></table></div>
-      <div><button class="btn" id="retry">Réessayer toutes les opérations refusées</button></div>` : ''}
-    <h3>Conflits de stock signalés par le serveur</h3><div id="conflicts"><p class="muted">Chargement…</p></div>`);
-
-  $('#sync-now').addEventListener('click', async () => { await runOnce(); sync(); });
-  $('#seen')?.addEventListener('click', async () => { await markConflictsSeen(); sync(); });
-  $('#retry')?.addEventListener('click', async () => { await retryRejected(); await runOnce(); sync(); });
-  el.querySelectorAll('[data-drop]').forEach((b) => b.addEventListener('click', async () => {
-    if (await confirmModal('Abandonner cette opération ?', "Une création refusée sera masquée de ce poste. Cette action est définitive.", 'Abandonner')) {
-      await discardRejected(Number(b.dataset.drop));
-      sync();
-    }
-  }));
-
-  const box = $('#conflicts');
-  try {
-    const list = await listConflicts();
-    mount(box, list.length ? html`<div class="table-wrap short"><table><thead><tr><th>Date</th><th>Type</th><th>Détail</th><th>Action</th></tr></thead><tbody>
-      ${list.map((c) => html`<tr><td>${fmtDate(c.created_at)}</td><td><span class="tag bad">${c.type}</span></td><td style="white-space:normal">${c.detail}</td>
-        <td><button class="btn btn-sm" data-resolve="${c.id}">Clôturer</button></td></tr>`)}</tbody></table></div>`
-      : html`<p class="muted">Aucun conflit à traiter.</p>`);
-    box.querySelectorAll('[data-resolve]').forEach((b) => b.addEventListener('click', async () => {
-      const ok = await openModal({
-        title: 'Clôturer le conflit', submitLabel: 'Clôturer',
-        body: field('Commentaire (action menée : inventaire, correction du stock…)', html`<textarea class="in" name="c" required></textarea>`),
-        onSubmit: async (form) => { await resolveConflict(b.dataset.resolve, val(form, 'c')); },
-      });
-      if (ok) sync();
-    }));
-  } catch (e) {
-    mount(box, html`<p class="muted">${e.message}</p>`);
-  }
 }
 
 // ------------------------------------------------------------------ comptes
@@ -167,9 +102,8 @@ async function categories() {
       title: c ? 'Modifier la catégorie' : 'Nouvelle catégorie', submitLabel: 'Enregistrer',
       body: html`<div class="grid2">
         ${field('Nom', html`<input class="in" name="nom" value="${c?.nom ?? ''}" required />`, { span2: true })}
-        ${field('Icône (Lucide)', html`<input class="in" name="icone" value="${c?.icone ?? 'package'}" />`)}
         ${field('Couleur pastel', html`<input class="in" type="color" name="couleur" value="${c?.couleur_fond ?? '#E3F2FD'}" />`)}</div>`,
-      onSubmit: async (f) => { await saveCategorie({ id: c?.id, nom: val(f, 'nom'), icone: val(f, 'icone'), couleur_fond: val(f, 'couleur') }); toast('Catégorie enregistrée.'); },
+      onSubmit: async (f) => { await saveCategorie({ id: c?.id, nom: val(f, 'nom'), icone: 'package', couleur_fond: val(f, 'couleur') }); toast('Catégorie enregistrée.'); },
     });
     if (ok) { categories(); requestSync(); }
   };

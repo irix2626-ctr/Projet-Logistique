@@ -73,16 +73,11 @@ export async function renderLogin(root, { onLoggedIn }) {
         <div class="brand"><i></i>Logistique</div>
         <h1>Le matériel, tracé du lot jusqu'à la sortie.</h1>
         <p>Entrées, sorties et stock des ressources matérielles, avec le coût de chaque lot et son usage. Fonctionne sans connexion et se synchronise ensuite.</p>
-        <ul>${['PNLP', 'PNLT', 'PNLS', 'UCP-FM'].map((p) => html`<li>${p}</li>`)}</ul>
       </section>
       <section class="login-form">
         <form id="lf" novalidate>
           <h2>Connexion</h2>
           ${online ? '' : html`<p class="banner warn" role="status">Serveur injoignable : seuls les comptes déjà connectés en ligne sur ce poste peuvent se connecter.</p>`}
-          ${field('Structure', html`<select class="in" name="structure" required>
-            <option value="">— Choisir —</option>
-            ${structures.map((s) => html`<option value="${s.id}">${s.nom}</option>`)}
-          </select>`)}
           ${field('Identifiant ou e-mail', html`<input class="in" name="id" autocomplete="username" required />`)}
           ${field('Mot de passe', html`<input class="in" name="pw" type="password" autocomplete="current-password" required />`)}
           <p class="err" id="lerr" role="alert" hidden></p>
@@ -92,10 +87,7 @@ export async function renderLogin(root, { onLoggedIn }) {
       </section>
     </div>`);
 
-  const last = await getKv('last_structure');
-  const sel = $('select[name=structure]');
-  if (last && structures.some((s) => s.id === last)) sel.value = last;
-  else if (structures.length === 1) sel.value = structures[0].id;
+  const defaultStructureId = (await getKv('last_structure')) || structures[0]?.id;
 
   $('#srv').addEventListener('click', async () => {
     await serverSettings();
@@ -109,7 +101,7 @@ export async function renderLogin(root, { onLoggedIn }) {
     err.hidden = true;
     btn.disabled = true;
     try {
-      await login({ structureId: val(e.target, 'structure'), identifiant: val(e.target, 'id'), password: val(e.target, 'pw') });
+      await login({ structureId: defaultStructureId, identifiant: val(e.target, 'id'), password: val(e.target, 'pw') });
       const { setKv } = await import('../core/db.js');
       await setKv('last_structure', session.user.structure_id);
       if (session.user.must_change_password && !(await forcePasswordChange())) return renderLogin(root, { onLoggedIn });
